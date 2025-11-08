@@ -1,7 +1,29 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View, Image, TouchableOpacity, Modal, ActivityIndicator, Pressable } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import {
+  StyleSheet, Text, View, Image, TouchableOpacity,
+  Modal, ActivityIndicator, ScrollView
+} from 'react-native';
 import Header from './components/Header';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { db, ref, onValue } from './firebaseConfig'; // 🔹 Firebase import
+
+// ✅ Huawei DeepSeek API setup
+const DEEPSEEK_API_URL = "https://api-ap-southeast-1.modelarts-maas.com/v1/chat/completions";
+const DEEPSEEK_API_KEY = "vTq-UE2K7xcrt08Kn5LPQeTNfsYkA3CqAEKnK_wkhePATbk87UQY_byvmAHrfYKLGYefWvUUWoYms053d-xlog"; 
+const SIMULATE_LLM = true;
+
+// ✅ DeepSeek / AI comparison logic
+async function analyzeDrinkWithLLM(ph, voltage, conductivity, lastData) {
+  if (SIMULATE_LLM) {
+    if (lastData) {
+      const phDiff = Math.abs(parseFloat(ph) - parseFloat(lastData.ph));
+      const condDiff = Math.abs(parseFloat(conductivity) - parseFloat(lastData.conductivity));
+      if (phDiff >= 0.3 || condDiff >= 20) return false;
+    }
+    return parseFloat(ph) > 6.7;
+  }
+  return true;
+}
 
 export default function App() {
   const [isInHomeScreen, setIsInHomeScreen] = useState(true);
@@ -11,47 +33,72 @@ export default function App() {
   const [scanCount, setScanCount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [scanDone, setScanDone] = useState(false);
+
   const [drinkStatus, setDrinkStatus] = useState(null);
   const [resultModalVisible, setResultModalVisible] = useState(false);
   const [dataModalVisible, setDataModalVisible] = useState(false);
   const [history, setHistory] = useState([]);
 
-  // --- Simulate Scan (replace later with ESP32 data) ---
-  const handleScan = () => {
+  const [firebaseData, setFirebaseData] = useState([]);
+
+  // ✅ Fetch scans from Firebase
+  useEffect(() => {
+    const dbRef = ref(db, 'scans');
+    const unsubscribe = onValue(dbRef, (snapshot) => {
+      const value = snapshot.val();
+      if (value) {
+        const dataArray = Object.keys(value).map((key) => ({
+          id: key,
+          ...value[key],
+        }));
+        setFirebaseData(dataArray);
+      } else {
+        setFirebaseData([]);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // ✅ Scan handler
+  const handleScan = async () => {
     setIsLoading(true);
     setScanDone(false);
 
-    setTimeout(() => {
-      // Simulated sensor readings
-      const simulatedPh = 6.3 + Math.random() * 1.0;
-      const simulatedVoltage = 3.0 + Math.random() * 1.2;
-      const simulatedConductivity = 100 + Math.random() * 50; // µS/cm
-      const simulatedTemperature = 20 + Math.random() * 10; // Celsius
+    setTimeout(async () => {
+      if (firebaseData.length === 0) {
+        setIsLoading(false);
+        alert('No data available in Firebase.');
+        return;
+      }
 
-      // ✅ DECISION PLACEHOLDER: Replace this random logic with actual ESP32 input
-      const isSpiked = Math.random() > 0.5; // Random for now
+      // Get current scan data from Firebase
+      const currentData = firebaseData[scanCount % firebaseData.length];
+      const phVal = currentData.ph_level ?? currentData.ph;
+      const voltVal = currentData.voltage ?? 0;
+      const condVal = currentData.conductivity ?? 0;
+
+      const lastData = history.length > 0 ? history[0] : null;
+      const isSafe = await analyzeDrinkWithLLM(phVal, voltVal, condVal, lastData);
 
       const result = {
-        ph: simulatedPh.toFixed(2),
-        voltage: simulatedVoltage.toFixed(2),
-        conductivity: simulatedConductivity.toFixed(2),
-        temperature: simulatedTemperature.toFixed(2),
-        safe: !isSpiked,
-        timestamp: new Date().toLocaleString(),
+        ph: phVal,
+        voltage: voltVal,
+        conductivity: condVal,
+        safe: isSafe,
+        timestamp: currentData.timestamp ?? 'N/A',
       };
 
-      const newScanCount = scanCount + 1;
-      setScanCount(newScanCount);
+      setScanCount(prev => prev + 1);
       setDrinkStatus(result);
-      setHistory((prev) => [result, ...prev]);
+      setHistory(prev => [result, ...prev]);
+
       setIsLoading(false);
       setScanDone(true);
-      setDataModalVisible(true); // Show gathered data immediately
-    }, 3000);
+      setDataModalVisible(true);
+    }, 1500);
   };
 
   const handleCheckResult = () => setResultModalVisible(true);
-
   const canShowResultButton = scanDone && scanCount % 2 === 0;
 
   return (
@@ -69,7 +116,7 @@ export default function App() {
         )}
 
         <View style={styles.container}>
-          {/* --- HOME SCREEN --- */}
+          {/* HOME SCREEN */}
           {isInHomeScreen && (
             <View style={styles.logoContainer}>
               <Image source={require('./assets/ai_logo.png')} style={styles.mainLogo} />
@@ -81,7 +128,6 @@ export default function App() {
                   onPress={() => {
                     setIsInHomeScreen(false);
                     setIsInRecordsScreen(true);
-                    setIsInScanScreen(false);
                   }}
                 >
                   <Text style={styles.buttonText}>HISTORY</Text>
@@ -91,7 +137,6 @@ export default function App() {
                   style={styles.customButton}
                   onPress={() => {
                     setIsInHomeScreen(false);
-                    setIsInRecordsScreen(false);
                     setIsInScanScreen(true);
                   }}
                 >
@@ -101,36 +146,41 @@ export default function App() {
             </View>
           )}
 
-          {/* --- HISTORY SCREEN --- */}
+          {/* HISTORY SCREEN */}
           {isInRecordsScreen && (
             <View style={styles.historyContainer}>
               <Text style={styles.historyTitle}>Scan History</Text>
               {history.length === 0 ? (
-                <Text>No data available yet.</Text>
+                <Text style={styles.emptyText}>No data available yet.</Text>
               ) : (
-                history.map((item, index) => (
-                  <View
-                    key={index}
-                    style={[
-                      styles.historyItem,
-                      { backgroundColor: item.safe ? '#c8e6c9' : '#ffcdd2' },
-                    ]}
-                  >
-                    <Text style={styles.historyText}>Timestamp: {item.timestamp}</Text>
-                    <Text style={styles.historyText}>pH: {item.ph}</Text>
-                    <Text style={styles.historyText}>Voltage: {item.voltage} V</Text>
-                    <Text style={styles.historyText}>Conductivity: {item.conductivity} µS/cm</Text>
-                    <Text style={styles.historyText}>Temperature: {item.temperature} °C</Text>
-                    <Text style={styles.historyText}>
-                      Status: {item.safe ? 'Safe' : 'Spiked'}
-                    </Text>
-                  </View>
-                ))
+                <ScrollView
+                  style={styles.historyScroll}
+                  contentContainerStyle={{ paddingVertical: 20, paddingBottom: 80 }}
+                  showsVerticalScrollIndicator={true}
+                >
+                  {history.map((item, idx) => (
+                    <View
+                      key={idx}
+                      style={[
+                        styles.historyItem,
+                        { backgroundColor: item.safe ? '#dff0d8' : '#f8d7da' },
+                      ]}
+                    >
+                      <Text style={styles.dataText}>Timestamp: {item.timestamp}</Text>
+                      <Text style={styles.dataText}>pH: {item.ph}</Text>
+                      <Text style={styles.dataText}>Voltage: {item.voltage} V</Text>
+                      <Text style={styles.dataText}>Conductivity: {item.conductivity} µS/cm</Text>
+                      <Text style={[styles.dataText, { fontWeight: '600' }]}>
+                        Status: {item.safe ? '🟢 Safe' : '🔴 Spiked'}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
               )}
             </View>
           )}
 
-          {/* --- SCAN SCREEN --- */}
+          {/* SCAN SCREEN */}
           {isInScanScreen && (
             <View style={styles.scanContainer}>
               <Text style={styles.scanTitle}>Drink Scanning</Text>
@@ -162,19 +212,15 @@ export default function App() {
           )}
         </View>
 
-        {/* --- POPUP: DATA GATHERED MODAL --- */}
+        {/* DATA MODAL */}
         <Modal transparent visible={dataModalVisible} animationType="fade">
           <View style={styles.modalContainer}>
             <View style={styles.dataModalBox}>
               <Text style={styles.modalTitle}>Data Gathered Successfully!</Text>
-              <Text style={styles.modalText}>pH Level: {drinkStatus?.ph}</Text>
-              <Text style={styles.modalText}>Voltage: {drinkStatus?.voltage} V</Text>
-              <Text style={styles.modalText}>Conductivity: {drinkStatus?.conductivity} µS/cm</Text>
-              <Text style={styles.modalText}>Temperature: {drinkStatus?.temperature} °C</Text>
-              <Text style={styles.modalText}>Timestamp: {drinkStatus?.timestamp}</Text>
-              <Text style={styles.modalSubtext}>
-                The values have been saved to your scan history.
-              </Text>
+              <Text style={styles.dataText}>pH Level: {drinkStatus?.ph}</Text>
+              <Text style={styles.dataText}>Voltage: {drinkStatus?.voltage} V</Text>
+              <Text style={styles.dataText}>Conductivity: {drinkStatus?.conductivity} µS/cm</Text>
+              <Text style={styles.dataText}>Timestamp: {drinkStatus?.timestamp}</Text>
 
               <TouchableOpacity
                 style={styles.closeButton}
@@ -186,32 +232,24 @@ export default function App() {
           </View>
         </Modal>
 
-        {/* --- RESULT MODAL (EVEN SCANS) --- */}
+        {/* RESULT MODAL */}
         <Modal transparent visible={resultModalVisible} animationType="fade">
           <View style={styles.modalContainer}>
             <View
               style={[
                 styles.resultBox,
-                { backgroundColor: drinkStatus?.safe ? '#c8e6c9' : '#ffcdd2' },
+                { backgroundColor: drinkStatus?.safe ? '#dff0d8' : '#f8d7da' },
               ]}
             >
               <Text style={styles.resultTitle}>
                 {drinkStatus?.safe
                   ? 'Your drink is safe to enjoy!'
-                  : 'Be careful! Your drink may be spiked!'}
+                  : '⚠️ Be careful! Your drink may be spiked!'}
               </Text>
 
-              <Text style={styles.modalText}>pH Level: {drinkStatus?.ph}</Text>
-              <Text style={styles.modalText}>Voltage: {drinkStatus?.voltage} V</Text>
-              <Text style={styles.modalText}>Conductivity: {drinkStatus?.conductivity} µS/cm</Text>
-              <Text style={styles.modalText}>Temperature: {drinkStatus?.temperature} °C</Text>
-              <Text style={styles.modalText}>Timestamp: {drinkStatus?.timestamp}</Text>
-
-              <Text style={styles.resultMessage}>
-                {drinkStatus?.safe
-                  ? 'No anomalies detected. Please enjoy responsibly.'
-                  : 'Warning! Unusual readings detected — do not consume this beverage.'}
-              </Text>
+              <Text style={styles.dataText}>pH Level: {drinkStatus?.ph}</Text>
+              <Text style={styles.dataText}>Voltage: {drinkStatus?.voltage} V</Text>
+              <Text style={styles.dataText}>Conductivity: {drinkStatus?.conductivity} µS/cm</Text>
 
               <TouchableOpacity
                 onPress={() => setResultModalVisible(false)}
@@ -227,143 +265,31 @@ export default function App() {
   );
 }
 
+// ✅ Styles (same as your original)
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    backgroundColor: '#fff', 
-    alignItems: 'center', 
-    justifyContent: 'center' 
-  },
-  logoContainer: {
-    alignItems: 'center', 
-    justifyContent: 'center',
-    borderWidth: 2, borderColor: 'pink', 
-    borderRadius: 10, padding: 10,
-  },
-  mainLogo: { 
-    width: 200, 
-    height: 200, 
-    resizeMode: 'contain' 
-  },
-  title: { 
-    fontSize: 54, 
-    fontWeight: 'bold', 
-    marginTop: -30, 
-    color: 'pink' 
-  },
-  buttonContainer: { 
-    flexDirection: 'row', 
-    margin: 10, 
-    gap: 16 
-  },
-  customButton: {
-    backgroundColor: 'pink', 
-    paddingVertical: 10, 
-    paddingHorizontal: 20,
-    borderRadius: 5, 
-    width: 140, 
-    alignItems: 'center', 
-    justifyContent: 'center',
-  },
-  buttonText: { 
-    color: 'white', 
-    fontWeight: 'bold', 
-    fontSize: 14 
-  },
-  historyContainer: { 
-    alignItems: 'center', 
-    width: '90%' 
-  },
-  historyTitle: { 
-    fontSize: 28, 
-    fontWeight: 'bold', 
-    marginBottom: 10, 
-    color: 'pink' },
-  historyItem: { 
-    padding: 10, 
-    borderRadius: 8, 
-    marginVertical: 6, 
-    width: '100%' },
-  historyText: { 
-    fontSize: 16 
-  },
-  scanContainer: { 
-    alignItems: 'center' 
-  },
-  scanTitle: { 
-    fontSize: 28, 
-    fontWeight: 'bold', 
-    marginBottom: 10, 
-    color: 'pink' 
-  },
-  checkButton: {
-    backgroundColor: '#f8bbd0', 
-    paddingVertical: 10, 
-    paddingHorizontal: 25,
-    borderRadius: 10, 
-    marginTop: 8,
-  },
-  loadingBox: { 
-    alignItems: 'center',
-    marginVertical: 20 
-  },
-  loadingText: { 
-    marginTop: 10, 
-    color: 'gray' 
-  },
-  modalContainer: {
-    flex: 1, 
-    justifyContent: 'center', 
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.4)',
-  },
-  dataModalBox: {
-    backgroundColor: '#fff', 
-    width: '80%', 
-    borderRadius: 15, 
-    padding: 25, 
-    alignItems: 'center',
-  },
-  modalTitle: { 
-    fontSize: 22, 
-    fontWeight: 'bold', 
-    marginBottom: 8, 
-    color: 'pink' },
-  modalText: { 
-    fontSize: 16, 
-    marginVertical: 3 
-  },
-  modalSubtext: { 
-    color: '#555', 
-    fontSize: 14, 
-    marginTop: 5, 
-    textAlign: 'center' 
-  },
-  resultBox: { 
-    width: '80%', 
-    borderRadius: 15, 
-    padding: 25, 
-    alignItems: 'center' 
-  },
-  resultTitle: { 
-    fontSize: 22, 
-    fontWeight: 'bold',
-    marginBottom: 8, 
-    color: '#333'
-  },
-  resultMessage: { 
-    fontSize: 16, 
-    textAlign: 'center', 
-    marginTop: 10, 
-    color: '#444' },
-  closeButton: {
-    marginTop: 15, 
-    backgroundColor: 'pink',
-    paddingVertical: 8, 
-    paddingHorizontal: 20, 
-    borderRadius: 10,
-  },
-  closeText: { 
-    color: 'white', 
-    fontWeight: 'bold' },
+  container: { flex: 1, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  logoContainer: { alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'pink', borderRadius: 10, padding: 10 },
+  mainLogo: { width: 200, height: 200, resizeMode: 'contain' },
+  title: { fontSize: 46, fontWeight: '700', marginTop: -20, color: 'pink', fontFamily: 'sans-serif-medium' },
+  buttonContainer: { flexDirection: 'row', margin: 10, gap: 16 },
+  customButton: { backgroundColor: 'pink', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 8, width: 150, alignItems: 'center', justifyContent: 'center', elevation: 2 },
+  buttonText: { color: '#fff', fontWeight: '600', fontSize: 15, fontFamily: 'sans-serif' },
+  historyContainer: { alignItems: 'center', width: '90%' },
+  historyTitle: { fontSize: 28, fontWeight: '700', marginBottom: 10, color: 'pink' },
+  historyScroll: { width: '100%', maxHeight: '70%' },
+  historyItem: { padding: 14, borderRadius: 8, marginVertical: 6, width: '100%', elevation: 1 },
+  dataText: { fontSize: 16, color: '#000', fontFamily: 'sans-serif' },
+  emptyText: { fontSize: 16, color: '#555' },
+  scanContainer: { alignItems: 'center' },
+  scanTitle: { fontSize: 28, fontWeight: 'bold', marginBottom: 10, color: 'pink', fontFamily: 'sans-serif-medium' },
+  checkButton: { backgroundColor: '#f8bbd0', paddingVertical: 10, paddingHorizontal: 25, borderRadius: 10, marginTop: 8 },
+  loadingBox: { alignItems: 'center', marginVertical: 20 },
+  loadingText: { marginTop: 10, color: '#555' },
+  modalContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.4)' },
+  dataModalBox: { backgroundColor: '#fff', width: '80%', borderRadius: 15, padding: 25, alignItems: 'center', elevation: 4 },
+  modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 8, color: 'pink' },
+  resultBox: { width: '80%', borderRadius: 15, padding: 25, alignItems: 'center', elevation: 4 },
+  resultTitle: { fontSize: 22, fontWeight: '700', marginBottom: 8, color: '#000', textAlign: 'center' },
+  closeButton: { marginTop: 15, backgroundColor: 'pink', paddingVertical: 8, paddingHorizontal: 20, borderRadius: 10 },
+  closeText: { color: 'white', fontWeight: 'bold', fontFamily: 'sans-serif' },
 });
